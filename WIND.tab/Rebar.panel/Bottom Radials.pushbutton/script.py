@@ -1,0 +1,319 @@
+from Autodesk.Revit.DB.Structure import * 
+from Autodesk.Revit.DB import CurveByPoints, ReferencePointArray, ReferencePoint, CurveArray, PolyLine, Plane, SketchPlane, ElementTransformUtils
+from System.Collections.Generic import List
+from Autodesk.Revit.DB import Curve, Line, XYZ
+from Autodesk.Revit.DB.Structure import RebarShape
+import math, clr
+from Autodesk.Revit.DB import Transaction, Structure, FilteredElementCollector, RadialArray, ArrayAnchorMember
+from Autodesk.Revit.DB import BuiltInCategory, BuiltInParameter, Line, XYZ, FailureSeverity, FailureProcessingResult,IFailuresPreprocessor
+from pyrevit import forms
+
+clr.AddReference("Microsoft.Office.Interop.Excel")
+import Microsoft.Office.Interop.Excel as Excel
+
+doc = __revit__.ActiveUIDocument.Document
+uidoc = __revit__.ActiveUIDocument
+view = doc.ActiveView
+
+class SupressWarnings(IFailuresPreprocessor):
+    
+    def PreprocessFailures(self, failuresAccessor):
+        try:
+            failures = failuresAccessor.GetFailureMessages()
+            for failure in failures:
+                severity = failure.GetSeverity()
+                description = failure.GetDescriptionText()
+                fail_Id = failure.GetFailureDefinitionId()
+
+                if severity == FailureSeverity.Warning:
+                    failuresAccessor.DeleteWarning(failure)
+        except:
+            import traceback
+            print(traceback.format_exc())
+        
+        return FailureProcessingResult.Continue
+
+
+#### Input from excel sheet ####################################################################
+
+#FPath =  "C:\Users\Wagner.Human\Desktop\Wolf_RebarData_RevD_V162r5.xlsx"
+FPath = forms.pick_file(file_ext='xlsx', multi_file=False, unc_paths=False)
+
+excel = Excel.ApplicationClass()
+excel.Visible = False
+workbook = excel.Workbooks.Open(FPath)
+xl = workbook.Worksheets['A']
+
+####  Get number of Anchor Bolts#################################################################
+AC = FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_GenericModel).WhereElementIsNotElementType().ToElements()
+for Anchorcage in AC:
+    if "1PA_AnchorCage_Assembly 2" in Anchorcage.Name: 
+        AnchorCage = Anchorcage
+        break
+if AnchorCage == None:
+    forms.alert("Anchor Cage not found")
+
+AnchorBolts = AnchorCage.LookupParameter("nBolts").AsInteger()
+
+if not isinstance(AnchorBolts, int):
+    AnchorBolts = int(xl.Cells(3, 3).Value2)
+
+BRMaxDia = 0
+for i in range(5,200):
+    if "BR" in str(xl.Cells(i, 1).Value2):
+        if BRMaxDia < int(str(xl.Cells(i,4).Value2)[1:]):
+            BRMaxDia = int(str(xl.Cells(i,4).Value2)[1:])
+
+for i in range(5,200):
+    if "SF" in str(xl.Cells(i, 1).Value2):
+        slabFaceConDia = int(str(xl.Cells(i,4).Value2)[1:])/304.8
+
+
+#### Transaction ################################################################################
+t = Transaction(doc, 'Reinforce')
+t.Start()
+
+for i in range(5,200):
+    if "BR" in str(xl.Cells(i, 1).Value2):
+        bar_mark = str(xl.Cells(i,1).Value2)
+        no_bars_factor = float(xl.Cells(i,7).Value2)
+        size = "Y" + str(xl.Cells(i,4).Value2)[1:]
+        RotSwitch = float(xl.Cells(i,5).Value2)
+        StartRad = int(xl.Cells(i,2).Value2)/304.8
+        EndRad = int(xl.Cells(i,3).Value2)/304.8
+        StartHookLength = float(xl.Cells(i,11).Value2)/304.8
+        Level = int(xl.Cells(i,10).Value2)
+        Make_20 =  int(xl.Cells(i,13).Value2)
+        i += 1
+
+
+        print("#"*50)
+        print("  ----   " + "BAR MARK"+ "  ----   " + "NO BARS FACTOR" + "  ---  " + "SIZE"+ "  ---  " + "ROTATION SWITCH" + "  ---  " + "START RAD" + "  ---  " + "END RAD" + "  ---  " + "START HOOK" + "  ---  " + "LEVEL")
+        print("  ----   " + bar_mark + " \t ---- \t\t\t  " + str(no_bars_factor) + "  \t\t---  " + size + " \t\t --- \t\t " + str(RotSwitch) + "  --- \t\t\t\t " + str(StartRad*304.8) + "  ---  " + str(EndRad*304.8) + "  ---  " + str(StartHookLength*304.8) +"  ---  " + str(Level))
+        print("*"*10)
+        print(Make_20)  
+        print("*"*10)
+        no_bars = no_bars_factor*AnchorBolts
+
+        # diameter of the bottom grid bar
+        grid1dia = 32/304.8
+        
+
+        #####Rebar Shape ####################################################################
+
+        rebar_shape = FilteredElementCollector(doc).OfClass(RebarShape).WhereElementIsElementType().ToElements()   
+
+                      
+        for r_shape in rebar_shape:
+            if str(r_shape.ShapeFamilyId) == '5324105':
+                sc_41 = r_shape
+                break
+        
+        for r_shape in rebar_shape:
+            if str(r_shape.ShapeFamilyId) == '5324667':
+                sc_37 = r_shape
+                break
+        
+        for r_shape in rebar_shape:
+            if str(r_shape.ShapeFamilyId) == '5323829':
+                sc_20 = r_shape
+                break
+
+        ##### Rebar type ####################################################################
+            
+        all_rebar_types = FilteredElementCollector(doc) \
+            .OfCategory(BuiltInCategory.OST_Rebar).WhereElementIsElementType() \
+            .ToElements()
+
+        for  rebar_type in all_rebar_types:
+            rebar_name = rebar_type.get_Parameter(BuiltInParameter \
+                .SYMBOL_NAME_PARAM).AsString()
+            if rebar_name == size:
+                bar_type = rebar_type
+                break
+
+        barDia = bar_type.LookupParameter("Bar Diameter").AsDouble()
+
+        ##### Element Host ####################################################################
+            
+        WTF = FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_GenericModel).WhereElementIsNotElementType().ToElements()
+        for element in WTF:
+            if element.Name == "1PA_WTF_SteelTower":
+                WTF = element
+                break
+
+        type_id = WTF.GetTypeId()
+        type = doc.GetElement(type_id)
+        r_base = WTF.LookupParameter("rBase").AsDouble()
+        h_base = WTF.LookupParameter("hBase").AsDouble()
+        r_plinth = WTF.LookupParameter("rPlinth").AsDouble()
+        h_cone = WTF.LookupParameter("hCone").AsDouble()
+        h_plinth = WTF.LookupParameter("hPlinth").AsDouble()
+        slabSlope = (h_cone - h_base)/(r_base - r_plinth)
+        rPitOuter = WTF.LookupParameter("rVoidOuter").AsDouble()
+        rPitInner = WTF.LookupParameter("rVoidInner").AsDouble()
+        hPit = WTF.LookupParameter("hBottomVoid").AsDouble()
+        locPoint = WTF.Location.Point
+
+        if StartRad < rPitOuter and StartRad > rPitInner:
+            print("check bar" + bar_mark + " - Starting Radius is on pit slope")
+            
+
+        #cover
+        top_cover = 40/304.8
+        bot_cover = 50/304.8
+        radius = r_base - bot_cover - barDia/2
+
+
+        if EndRad > (r_base - bot_cover - slabFaceConDia):
+            EndRad = r_base - bot_cover - slabFaceConDia  
+
+        #### Rebar Shape Properties ####################################################################
+
+        #Rebar Properties
+        #A
+        A =  StartHookLength  
+        #B
+        B = EndRad - StartRad 
+
+        print("A: " + str(A*304.8))
+        print("B: " + str(B*304.8))
+
+
+        level2Offset = (64 + BRMaxDia/2)/304.8 +barDia/2
+
+        if Level == 1:
+            rebar_p1 = locPoint+XYZ(StartRad     ,0 , bot_cover  + A)
+            rebar_p2 = locPoint+XYZ(StartRad     ,0 , bot_cover+barDia/2)
+            rebar_p3 = locPoint+XYZ(EndRad       ,0 , bot_cover+barDia/2)
+        elif Level == 2:
+            rebar_p1 = locPoint+XYZ(StartRad     ,0 , bot_cover  + A +level2Offset)
+            rebar_p2 = locPoint+XYZ(StartRad     ,0 , bot_cover+barDia/2 + level2Offset)
+            rebar_p3 = locPoint+XYZ(EndRad       ,0 , bot_cover+barDia/2 + level2Offset)
+        else:
+            print("Level not valid")
+
+        theta = math.atan(hPit/(rPitOuter - rPitInner))
+        xdelta = ((barDia/2)+bot_cover)*math.cos((math.pi/2)-theta)
+        gridDelta = (2*grid1dia)/math.tan(theta)
+
+        rebar_p4 = locPoint+XYZ(rPitOuter-xdelta,0 , bot_cover+barDia/2)
+        rebar_p5 = locPoint+XYZ(rPitInner-xdelta+gridDelta,0 , bot_cover+barDia/2-hPit+grid1dia*2)
+        rebar_p6 = locPoint+XYZ(StartRad        ,0 , bot_cover+barDia/2-hPit+grid1dia*2)
+        
+        curve1 = Line.CreateBound(rebar_p1, rebar_p2)
+        curve2 = Line.CreateBound(rebar_p2, rebar_p3)
+        
+        curve3 = Line.CreateBound(rebar_p6, rebar_p5)
+        curve4 = Line.CreateBound(rebar_p5, rebar_p4)
+        curve5 = Line.CreateBound(rebar_p4, rebar_p3)
+
+
+        #### Cast the list to IList<Curve>
+        curve_list20 = List[Curve]([curve2])
+
+
+        curve_list41 = List[Curve]([curve3, curve4, curve5])
+
+        curve_list37 = List[Curve]([ curve1, curve2 ])
+        #### Bluid ####################################################################
+        if Make_20 == int(1):
+            rebar = Structure.Rebar.CreateFromCurvesAndShape(doc, 
+                                                            sc_20, #RebarStyle.Standard,
+                                                            bar_type, 
+                                                            None,
+                                                            None, 
+                                                            WTF, 
+                                                            XYZ.BasisY, 
+                                                            curve_list20,
+                                                            RebarHookOrientation.Left, 
+                                                            RebarHookOrientation.Left)#,1,0)
+        else:    
+            if StartRad > rPitOuter + 0.1:        
+                if StartHookLength < 100/304.8 :
+                    rebar = Structure.Rebar.CreateFromCurvesAndShape(doc, 
+                                                            sc_20, #RebarStyle.Standard,
+                                                            bar_type, 
+                                                            None,
+                                                            None, 
+                                                            WTF, 
+                                                            XYZ.BasisY, 
+                                                            curve_list20,
+                                                            RebarHookOrientation.Left, 
+                                                            RebarHookOrientation.Left)#,1,0)
+                else:
+                    rebar = Structure.Rebar.CreateFromCurves(doc, 
+                                                        RebarStyle.Standard, 
+                                                        bar_type, 
+                                                        None, 
+                                                        None, 
+                                                        WTF, 
+                                                        XYZ.BasisY, 
+                                                        curve_list37, 
+                                                        RebarHookOrientation.Left, 
+                                                        RebarHookOrientation.Left,1,1)
+            else:
+                if StartHookLength > 100/304.8:
+                    rebar = Structure.Rebar.CreateFromCurvesAndShape(doc, 
+                                            sc_37, #RebarStyle.Standard,
+                                            bar_type, 
+                                            None,
+                                            None, 
+                                            WTF, 
+                                            XYZ.BasisY, 
+                                            curve_list37,
+                                            RebarHookOrientation.Left, 
+                                            RebarHookOrientation.Left)#,1,0)
+                else:
+                    rebar = Structure.Rebar.CreateFromCurvesAndShape(doc, 
+                                                                sc_41, #RebarStyle.Standard,
+                                                                bar_type, 
+                                                                None,
+                                                                None, 
+                                                                WTF, 
+                                                                XYZ.BasisY, 
+                                                                curve_list41,
+                                                                RebarHookOrientation.Left, 
+                                                                RebarHookOrientation.Left)#,1,0)
+
+            
+                
+        print("Construction Bar Created")
+
+
+
+    #set construction link properties
+        # rebar.LookupParameter("A").Set(A)
+        # rebar.LookupParameter("B").Set(B)
+        # rebar.LookupParameter("C").Set(C)
+        # rebar.LookupParameter("D").Set(D)
+        
+        
+        #build radial array
+        RotAngle = 360*math.pi/180
+
+        elem = RadialArray.ArrayElementWithoutAssociation(doc,
+                                                           view, 
+                                                           rebar.Id,
+                                                           no_bars, 
+                                                           Line.CreateBound(locPoint,locPoint+XYZ.BasisZ), 
+                                                           RotAngle, ArrayAnchorMember.Last)
+
+
+        
+        #Rotate rebar 
+        for elm in elem:
+            doc.GetElement(elm).Location.Rotate( Line.CreateBound(locPoint, locPoint + XYZ.BasisZ), RotSwitch*RotAngle/(no_bars*2))
+            doc.GetElement(elm).LookupParameter("Mark").Set("BOTTOM RADIAL")
+            doc.GetElement(elm).LookupParameter("Schedule Mark").Set(bar_mark)
+        print("Radial Array Created")
+        print('#'*50)
+ #       delete construction bar
+        #doc.Delete(rebar.Id)  
+
+## Supress warnings ################################################################
+failHandler = t.GetFailureHandlingOptions()
+failHandler.SetFailuresPreprocessor(SupressWarnings())
+t.SetFailureHandlingOptions(failHandler)
+t.Commit()
+
